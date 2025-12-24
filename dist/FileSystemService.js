@@ -23,6 +23,28 @@ export function isOPFSAvailable() {
         'getDirectory' in navigator.storage;
 }
 /**
+ * Test if OPFS write support works (Safari doesn't support createWritable)
+ */
+async function testOPFSWriteSupport() {
+    try {
+        const root = await navigator.storage.getDirectory();
+        const testFile = await root.getFileHandle('.opfs-write-test', { create: true });
+        // Safari doesn't support createWritable - this is what fails
+        if (typeof testFile.createWritable !== 'function') {
+            return false;
+        }
+        const writable = await testFile.createWritable();
+        await writable.write('test');
+        await writable.close();
+        // Clean up test file
+        await root.removeEntry('.opfs-write-test');
+        return true;
+    }
+    catch {
+        return false;
+    }
+}
+/**
  * Get the best available backend based on browser support
  */
 export async function getBestBackend() {
@@ -30,10 +52,15 @@ export async function getBestBackend() {
     const { opfsBackend } = await import('./OPFSBackend');
     const { indexedDBBackend } = await import('./IndexedDBBackend');
     if (isOPFSAvailable()) {
-        // Verify OPFS actually works (some browsers have the API but it fails)
+        // Verify OPFS actually works including write support
+        // Safari has OPFS read support but no createWritable() for writes
         try {
-            await navigator.storage.getDirectory();
-            return opfsBackend;
+            const writeSupported = await testOPFSWriteSupport();
+            if (writeSupported) {
+                return opfsBackend;
+            }
+            console.warn('[FileSystem] OPFS available but createWritable not supported, falling back to IndexedDB');
+            return indexedDBBackend;
         }
         catch {
             console.warn('[FileSystem] OPFS available but failed, falling back to IndexedDB');
