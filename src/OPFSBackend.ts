@@ -2,16 +2,10 @@
  * OPFS (Origin Private File System) Backend
  *
  * Native browser filesystem with:
- * - Fast file I/O (designed for large files)
- * - Streaming support
+ * - Fast file I/O (optimized for large files)
+ * - Streaming support via createWritable()
  * - Persistent storage
- * - Direct file handles (no serialization overhead)
- *
- * Used for:
- * - Document storage (/documents)
- * - WASM compiler binaries (/compiler)
- * - Compilation output (/output)
- * - Git repositories (/git)
+ * - No serialization overhead
  */
 
 import type { FileSystemBackend, FileStats, FileEntry } from './types'
@@ -260,6 +254,32 @@ export class OPFSBackend implements FileSystemBackend {
       return this.getRoot()
     }
     return this.getDirectoryHandle(path)
+  }
+
+  /**
+   * Read multiple files in parallel (more efficient for batch reads)
+   */
+  async readBinaryBatch(paths: string[]): Promise<Map<string, Uint8Array>> {
+    const results = new Map<string, Uint8Array>()
+
+    // Read all files in parallel
+    const readPromises = paths.map(async (path) => {
+      try {
+        const data = await this.readBinary(path)
+        return { path, data }
+      } catch {
+        return { path, data: null }
+      }
+    })
+
+    const outcomes = await Promise.all(readPromises)
+    for (const { path, data } of outcomes) {
+      if (data) {
+        results.set(path, data)
+      }
+    }
+
+    return results
   }
 }
 

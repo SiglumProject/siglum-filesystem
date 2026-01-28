@@ -56,6 +56,13 @@ if (isOPFSAvailable()) {
 }
 ```
 
+### Check Backend Type
+
+```typescript
+// Get the backend type for a mounted path
+const type = fileSystem.getBackendType('/documents')  // 'opfs', 'indexeddb', or null
+```
+
 ## Manual Backend Selection
 
 For direct control, import and mount backends explicitly:
@@ -67,6 +74,49 @@ fileSystem.mount('/documents', opfsBackend)
 fileSystem.mount('/legacy', indexedDBBackend)
 ```
 
+## Batch Operations
+
+For reading multiple files efficiently:
+
+```typescript
+const paths = ['/documents/a.txt', '/documents/b.txt', '/documents/c.txt']
+const results = await fileSystem.readBinaryBatch(paths)
+// Returns Map<string, Uint8Array> - missing files are omitted
+```
+
+## Web Worker Support
+
+For accessing the filesystem from Web Workers (including classic workers that can't use ES modules):
+
+```typescript
+// In your worker
+import {
+  readBinaryIDB,
+  writeBinaryIDB,
+  readBinaryOPFS,
+  writeBinaryOPFS,
+  isOPFSAvailable
+} from '@siglum/filesystem/worker'
+
+// Read/write directly without the full service
+const data = await readBinaryIDB('/path/to/file')
+await writeBinaryOPFS('/path/to/file', new Uint8Array([1, 2, 3]))
+```
+
+### Storage Constants
+
+Access the underlying storage identifiers (useful for direct IndexedDB/OPFS access):
+
+```typescript
+import {
+  IDB_NAME,        // 'siglum_filesystem'
+  IDB_VERSION,     // 1
+  IDB_FILES_STORE, // 'files'
+  IDB_DIRS_STORE,  // 'directories'
+  OPFS_ROOT        // ''
+} from '@siglum/filesystem/constants'
+```
+
 ## Backends
 
 ### OPFS (Origin Private File System)
@@ -74,7 +124,6 @@ fileSystem.mount('/legacy', indexedDBBackend)
 Fast, persistent storage using the browser's Origin Private File System API.
 - Best performance for large files
 - Streaming support
-- ~95% browser support (Chrome, Edge, Firefox, Safari 16.4+)
 
 ### IndexedDB
 
@@ -86,25 +135,63 @@ Fallback for browsers without OPFS support.
 
 ### FileSystemService
 
+#### Mounting
+
 - `mount(path, backend)` - Mount a backend at a path
+- `mountAuto(path, options?)` - Mount with automatic backend selection
 - `unmount(path)` - Unmount a backend
-- `writeFile(path, content)` - Write text content
+- `getMounts()` - List all mount points
+- `isMounted(path)` - Check if a path has a mounted backend
+- `getBackendType(path)` - Get backend type ('opfs' | 'indexeddb' | null)
+
+#### File Operations
+
 - `readFile(path)` - Read text content
-- `writeBinary(path, data)` - Write binary data
+- `writeFile(path, content, options?)` - Write text content
 - `readBinary(path)` - Read binary data
+- `writeBinary(path, data, options?)` - Write binary data
+- `readBinaryBatch(paths)` - Read multiple files efficiently (returns `Map<string, Uint8Array>`)
+- `deleteFile(path)` - Delete a file
+- `copyFile(src, dest)` - Copy a file
+- `rename(oldPath, newPath)` - Rename or move a file
+
+#### Directory Operations
+
+- `mkdir(path)` - Create directory (and parents)
+- `rmdir(path, options?)` - Remove directory (`{ recursive?: boolean }`)
+- `readdir(path)` - List directory contents (returns `FileEntry[]`)
+
+#### Query Operations
+
 - `exists(path)` - Check if path exists
-- `stat(path)` - Get file stats
-- `readdir(path)` - List directory contents
-- `mkdir(path)` - Create directory
-- `deleteFile(path)` - Delete file
-- `deleteDirectory(path)` - Delete directory recursively
+- `stat(path)` - Get file/directory stats (returns `FileStats`)
 
-## For Git Operations
+#### Events
 
-For isomorphic-git integration, use [@siglum/git](https://github.com/SiglumProject/siglum-ui/tree/main/packages/git) instead:
+- `subscribe(handler)` - Subscribe to filesystem events, returns unsubscribe function
+
+### Types
 
 ```typescript
-import { createOPFSGitAdapter } from '@siglum/git'
+interface FileStats {
+  size: number
+  isDirectory: boolean
+  isFile: boolean
+  mtime: Date
+}
+
+interface FileEntry {
+  name: string
+  path: string
+  isDirectory: boolean
+}
+
+type FileSystemEvent =
+  | { type: 'file:created'; path: string }
+  | { type: 'file:modified'; path: string }
+  | { type: 'file:deleted'; path: string }
+  | { type: 'directory:created'; path: string }
+  | { type: 'directory:deleted'; path: string }
 ```
 
 ## License

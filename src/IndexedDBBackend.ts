@@ -1,19 +1,12 @@
 /**
  * IndexedDB-backed filesystem
  *
- * This is a transitional backend that stores files in IndexedDB.
- * It wraps the storage pattern from DocumentStore but exposes a
- * filesystem-like interface.
- *
- * In the future, this will be replaced by OPFSBackend.
+ * Fallback backend for browsers without OPFS support.
+ * Stores files and directories in IndexedDB object stores.
  */
 
 import type { FileSystemBackend, FileStats, FileEntry } from './types'
-
-const DB_NAME = 'siglum_filesystem'
-const DB_VERSION = 1
-const FILES_STORE = 'files'
-const DIRS_STORE = 'directories'
+import { IDB_NAME, IDB_VERSION, IDB_FILES_STORE, IDB_DIRS_STORE } from './constants'
 
 interface StoredFile {
   path: string
@@ -39,7 +32,7 @@ export class IndexedDBBackend implements FileSystemBackend {
 
   private async initDB(): Promise<IDBDatabase> {
     return new Promise((resolve, reject) => {
-      const request = indexedDB.open(DB_NAME, DB_VERSION)
+      const request = indexedDB.open(IDB_NAME, IDB_VERSION)
 
       request.onerror = () => reject(request.error)
       request.onsuccess = () => resolve(request.result)
@@ -48,14 +41,14 @@ export class IndexedDBBackend implements FileSystemBackend {
         const db = (event.target as IDBOpenDBRequest).result
 
         // Files store - keyed by path
-        if (!db.objectStoreNames.contains(FILES_STORE)) {
-          const filesStore = db.createObjectStore(FILES_STORE, { keyPath: 'path' })
+        if (!db.objectStoreNames.contains(IDB_FILES_STORE)) {
+          const filesStore = db.createObjectStore(IDB_FILES_STORE, { keyPath: 'path' })
           filesStore.createIndex('mtime', 'mtime', { unique: false })
         }
 
         // Directories store - keyed by path
-        if (!db.objectStoreNames.contains(DIRS_STORE)) {
-          db.createObjectStore(DIRS_STORE, { keyPath: 'path' })
+        if (!db.objectStoreNames.contains(IDB_DIRS_STORE)) {
+          db.createObjectStore(IDB_DIRS_STORE, { keyPath: 'path' })
         }
       }
     })
@@ -86,8 +79,8 @@ export class IndexedDBBackend implements FileSystemBackend {
     const normalized = this.normalizePath(path)
 
     return new Promise((resolve, reject) => {
-      const transaction = db.transaction([FILES_STORE], 'readonly')
-      const store = transaction.objectStore(FILES_STORE)
+      const transaction = db.transaction([IDB_FILES_STORE], 'readonly')
+      const store = transaction.objectStore(IDB_FILES_STORE)
       const request = store.get(normalized)
 
       request.onsuccess = () => {
@@ -113,8 +106,8 @@ export class IndexedDBBackend implements FileSystemBackend {
     const normalized = this.normalizePath(path)
 
     return new Promise((resolve, reject) => {
-      const transaction = db.transaction([FILES_STORE], 'readonly')
-      const store = transaction.objectStore(FILES_STORE)
+      const transaction = db.transaction([IDB_FILES_STORE], 'readonly')
+      const store = transaction.objectStore(IDB_FILES_STORE)
       const request = store.get(normalized)
 
       request.onsuccess = () => {
@@ -150,8 +143,8 @@ export class IndexedDBBackend implements FileSystemBackend {
     }
 
     return new Promise((resolve, reject) => {
-      const transaction = db.transaction([FILES_STORE], 'readwrite')
-      const store = transaction.objectStore(FILES_STORE)
+      const transaction = db.transaction([IDB_FILES_STORE], 'readwrite')
+      const store = transaction.objectStore(IDB_FILES_STORE)
 
       // Check if file exists to preserve ctime
       const getRequest = store.get(normalized)
@@ -161,7 +154,7 @@ export class IndexedDBBackend implements FileSystemBackend {
           path: normalized,
           content,
           isBinary: false,
-          size: new TextEncoder().encode(content).length,
+          size: new Blob([content]).size,
           mtime: now,
           ctime: existing?.ctime ?? now
         }
@@ -189,8 +182,8 @@ export class IndexedDBBackend implements FileSystemBackend {
     }
 
     return new Promise((resolve, reject) => {
-      const transaction = db.transaction([FILES_STORE], 'readwrite')
-      const store = transaction.objectStore(FILES_STORE)
+      const transaction = db.transaction([IDB_FILES_STORE], 'readwrite')
+      const store = transaction.objectStore(IDB_FILES_STORE)
 
       // Check if file exists to preserve ctime
       const getRequest = store.get(normalized)
@@ -218,8 +211,8 @@ export class IndexedDBBackend implements FileSystemBackend {
     const normalized = this.normalizePath(path)
 
     return new Promise((resolve, reject) => {
-      const transaction = db.transaction([FILES_STORE], 'readwrite')
-      const store = transaction.objectStore(FILES_STORE)
+      const transaction = db.transaction([IDB_FILES_STORE], 'readwrite')
+      const store = transaction.objectStore(IDB_FILES_STORE)
       const request = store.delete(normalized)
 
       request.onsuccess = () => resolve()
@@ -231,26 +224,24 @@ export class IndexedDBBackend implements FileSystemBackend {
     const db = await this.dbPromise
     const normalized = this.normalizePath(path)
 
-    // Check files
-    const fileExists = await new Promise<boolean>((resolve, reject) => {
-      const transaction = db.transaction([FILES_STORE], 'readonly')
-      const store = transaction.objectStore(FILES_STORE)
-      const request = store.get(normalized)
-
-      request.onsuccess = () => resolve(!!request.result)
-      request.onerror = () => reject(request.error)
-    })
-
-    if (fileExists) return true
-
-    // Check directories
+    // Check both stores in a single transaction
     return new Promise<boolean>((resolve, reject) => {
-      const transaction = db.transaction([DIRS_STORE], 'readonly')
-      const store = transaction.objectStore(DIRS_STORE)
-      const request = store.get(normalized)
+      const transaction = db.transaction([IDB_FILES_STORE, IDB_DIRS_STORE], 'readonly')
+      const filesStore = transaction.objectStore(IDB_FILES_STORE)
+      const dirsStore = transaction.objectStore(IDB_DIRS_STORE)
 
-      request.onsuccess = () => resolve(!!request.result)
-      request.onerror = () => reject(request.error)
+      const fileRequest = filesStore.get(normalized)
+      fileRequest.onsuccess = () => {
+        if (fileRequest.result) {
+          resolve(true)
+          return
+        }
+        // Not a file, check directories
+        const dirRequest = dirsStore.get(normalized)
+        dirRequest.onsuccess = () => resolve(!!dirRequest.result)
+        dirRequest.onerror = () => reject(dirRequest.error)
+      }
+      fileRequest.onerror = () => reject(fileRequest.error)
     })
   }
 
@@ -258,82 +249,104 @@ export class IndexedDBBackend implements FileSystemBackend {
     const db = await this.dbPromise
     const normalized = this.normalizePath(path)
 
-    // Try files first
-    const file = await new Promise<StoredFile | undefined>((resolve, reject) => {
-      const transaction = db.transaction([FILES_STORE], 'readonly')
-      const store = transaction.objectStore(FILES_STORE)
-      const request = store.get(normalized)
+    // Check both stores in a single transaction
+    return new Promise<FileStats>((resolve, reject) => {
+      const transaction = db.transaction([IDB_FILES_STORE, IDB_DIRS_STORE], 'readonly')
+      const filesStore = transaction.objectStore(IDB_FILES_STORE)
+      const dirsStore = transaction.objectStore(IDB_DIRS_STORE)
 
-      request.onsuccess = () => resolve(request.result)
-      request.onerror = () => reject(request.error)
-    })
+      const fileRequest = filesStore.get(normalized)
+      fileRequest.onsuccess = () => {
+        const file = fileRequest.result as StoredFile | undefined
+        if (file) {
+          resolve({
+            size: file.size,
+            isDirectory: false,
+            isFile: true,
+            mtime: new Date(file.mtime)
+          })
+          return
+        }
 
-    if (file) {
-      return {
-        size: file.size,
-        isDirectory: false,
-        isFile: true,
-        mtime: new Date(file.mtime)
+        // Not a file, check directories
+        const dirRequest = dirsStore.get(normalized)
+        dirRequest.onsuccess = () => {
+          const dir = dirRequest.result as StoredDirectory | undefined
+          if (dir) {
+            resolve({
+              size: 0,
+              isDirectory: true,
+              isFile: false,
+              mtime: new Date(dir.ctime)
+            })
+          } else {
+            reject(new Error(`ENOENT: no such file or directory: ${path}`))
+          }
+        }
+        dirRequest.onerror = () => reject(dirRequest.error)
       }
-    }
-
-    // Try directories
-    const dir = await new Promise<StoredDirectory | undefined>((resolve, reject) => {
-      const transaction = db.transaction([DIRS_STORE], 'readonly')
-      const store = transaction.objectStore(DIRS_STORE)
-      const request = store.get(normalized)
-
-      request.onsuccess = () => resolve(request.result)
-      request.onerror = () => reject(request.error)
+      fileRequest.onerror = () => reject(fileRequest.error)
     })
-
-    if (dir) {
-      return {
-        size: 0,
-        isDirectory: true,
-        isFile: false,
-        mtime: new Date(dir.ctime)
-      }
-    }
-
-    throw new Error(`ENOENT: no such file or directory: ${path}`)
   }
 
   async mkdir(path: string): Promise<void> {
     const db = await this.dbPromise
     const normalized = this.normalizePath(path)
 
-    // Create all parent directories
+    // Build all paths that need to exist
     const parts = normalized.split('/').filter(Boolean)
+    const pathsToCreate: string[] = []
     let currentPath = ''
-
     for (const part of parts) {
       currentPath += '/' + part
-
-      const exists = await new Promise<boolean>((resolve, reject) => {
-        const transaction = db.transaction([DIRS_STORE], 'readonly')
-        const store = transaction.objectStore(DIRS_STORE)
-        const request = store.get(currentPath)
-
-        request.onsuccess = () => resolve(!!request.result)
-        request.onerror = () => reject(request.error)
-      })
-
-      if (!exists) {
-        await new Promise<void>((resolve, reject) => {
-          const transaction = db.transaction([DIRS_STORE], 'readwrite')
-          const store = transaction.objectStore(DIRS_STORE)
-          const dir: StoredDirectory = {
-            path: currentPath,
-            ctime: Date.now()
-          }
-          const request = store.put(dir)
-
-          request.onsuccess = () => resolve()
-          request.onerror = () => reject(request.error)
-        })
-      }
+      pathsToCreate.push(currentPath)
     }
+
+    if (pathsToCreate.length === 0) return
+
+    // Check which paths already exist in a single transaction
+    const existingPaths = await new Promise<Set<string>>((resolve) => {
+      const existing = new Set<string>()
+      const transaction = db.transaction([IDB_DIRS_STORE], 'readonly')
+      const store = transaction.objectStore(IDB_DIRS_STORE)
+      let pending = pathsToCreate.length
+
+      for (const p of pathsToCreate) {
+        const request = store.get(p)
+        request.onsuccess = () => {
+          if (request.result) existing.add(p)
+          pending--
+          if (pending === 0) resolve(existing)
+        }
+        request.onerror = () => {
+          pending--
+          if (pending === 0) resolve(existing)
+        }
+      }
+    })
+
+    // Create missing directories in a single transaction
+    const missingPaths = pathsToCreate.filter(p => !existingPaths.has(p))
+    if (missingPaths.length === 0) return
+
+    const now = Date.now()
+    return new Promise<void>((resolve, reject) => {
+      const transaction = db.transaction([IDB_DIRS_STORE], 'readwrite')
+      const store = transaction.objectStore(IDB_DIRS_STORE)
+      let pending = missingPaths.length
+
+      for (const p of missingPaths) {
+        const dir: StoredDirectory = { path: p, ctime: now }
+        const request = store.put(dir)
+        request.onsuccess = () => {
+          pending--
+          if (pending === 0) resolve()
+        }
+        request.onerror = () => reject(request.error)
+      }
+
+      transaction.onerror = () => reject(transaction.error)
+    })
   }
 
   async rmdir(path: string, options?: { recursive?: boolean }): Promise<void> {
@@ -354,8 +367,8 @@ export class IndexedDBBackend implements FileSystemBackend {
 
     // Delete the directory itself
     return new Promise((resolve, reject) => {
-      const transaction = db.transaction([DIRS_STORE], 'readwrite')
-      const store = transaction.objectStore(DIRS_STORE)
+      const transaction = db.transaction([IDB_DIRS_STORE], 'readwrite')
+      const store = transaction.objectStore(IDB_DIRS_STORE)
       const request = store.delete(normalized)
 
       request.onsuccess = () => resolve()
@@ -368,83 +381,80 @@ export class IndexedDBBackend implements FileSystemBackend {
     const normalized = this.normalizePath(path)
     const prefix = normalized === '/' ? '/' : normalized + '/'
 
+    // Use IDBKeyRange to only scan entries with matching prefix
+    // Keys starting with prefix up to prefix + '\uffff' (highest unicode char)
+    const keyRange = IDBKeyRange.bound(prefix, prefix + '\uffff', false, true)
+
     const entries: FileEntry[] = []
     const seenNames = new Set<string>()
 
-    // Get files in this directory
-    await new Promise<void>((resolve, reject) => {
-      const transaction = db.transaction([FILES_STORE], 'readonly')
-      const store = transaction.objectStore(FILES_STORE)
-      const request = store.openCursor()
+    // Get files and directories in a single transaction
+    return new Promise<FileEntry[]>((resolve, reject) => {
+      const transaction = db.transaction([IDB_FILES_STORE, IDB_DIRS_STORE], 'readonly')
 
-      request.onsuccess = (event) => {
+      // Get files in this directory
+      const filesStore = transaction.objectStore(IDB_FILES_STORE)
+      const filesRequest = filesStore.openCursor(keyRange)
+
+      filesRequest.onsuccess = (event) => {
         const cursor = (event.target as IDBRequest).result
         if (cursor) {
           const file = cursor.value as StoredFile
-          if (file.path.startsWith(prefix)) {
-            // Get the immediate child name
-            const relativePath = file.path.slice(prefix.length)
-            const slashIndex = relativePath.indexOf('/')
-            const name = slashIndex === -1 ? relativePath : relativePath.slice(0, slashIndex)
+          // Get the immediate child name
+          const relativePath = file.path.slice(prefix.length)
+          const slashIndex = relativePath.indexOf('/')
+          const name = slashIndex === -1 ? relativePath : relativePath.slice(0, slashIndex)
 
-            if (name && !seenNames.has(name)) {
-              seenNames.add(name)
-              if (slashIndex === -1) {
-                // Direct child file
-                entries.push({
-                  name,
-                  path: file.path,
-                  isDirectory: false
-                })
+          if (name && !seenNames.has(name) && slashIndex === -1) {
+            // Direct child file
+            seenNames.add(name)
+            entries.push({
+              name,
+              path: file.path,
+              isDirectory: false
+            })
+          }
+          cursor.continue()
+        } else {
+          // Files done, now get directories
+          const dirsStore = transaction.objectStore(IDB_DIRS_STORE)
+          const dirsRequest = dirsStore.openCursor(keyRange)
+
+          dirsRequest.onsuccess = (event) => {
+            const cursor = (event.target as IDBRequest).result
+            if (cursor) {
+              const dir = cursor.value as StoredDirectory
+              if (dir.path !== normalized) {
+                const relativePath = dir.path.slice(prefix.length)
+                const slashIndex = relativePath.indexOf('/')
+                const name = slashIndex === -1 ? relativePath : relativePath.slice(0, slashIndex)
+
+                if (name && !seenNames.has(name)) {
+                  seenNames.add(name)
+                  entries.push({
+                    name,
+                    path: prefix + name,
+                    isDirectory: true
+                  })
+                }
               }
-            }
-          }
-          cursor.continue()
-        } else {
-          resolve()
-        }
-      }
-      request.onerror = () => reject(request.error)
-    })
-
-    // Get subdirectories
-    await new Promise<void>((resolve, reject) => {
-      const transaction = db.transaction([DIRS_STORE], 'readonly')
-      const store = transaction.objectStore(DIRS_STORE)
-      const request = store.openCursor()
-
-      request.onsuccess = (event) => {
-        const cursor = (event.target as IDBRequest).result
-        if (cursor) {
-          const dir = cursor.value as StoredDirectory
-          if (dir.path.startsWith(prefix) && dir.path !== normalized) {
-            const relativePath = dir.path.slice(prefix.length)
-            const slashIndex = relativePath.indexOf('/')
-            const name = slashIndex === -1 ? relativePath : relativePath.slice(0, slashIndex)
-
-            if (name && !seenNames.has(name)) {
-              seenNames.add(name)
-              entries.push({
-                name,
-                path: prefix + name,
-                isDirectory: true
+              cursor.continue()
+            } else {
+              // Sort and return
+              entries.sort((a, b) => {
+                if (a.isDirectory !== b.isDirectory) {
+                  return a.isDirectory ? -1 : 1
+                }
+                return a.name.localeCompare(b.name)
               })
+              resolve(entries)
             }
           }
-          cursor.continue()
-        } else {
-          resolve()
+          dirsRequest.onerror = () => reject(dirsRequest.error)
         }
       }
-      request.onerror = () => reject(request.error)
-    })
-
-    return entries.sort((a, b) => {
-      // Directories first, then alphabetical
-      if (a.isDirectory !== b.isDirectory) {
-        return a.isDirectory ? -1 : 1
-      }
-      return a.name.localeCompare(b.name)
+      filesRequest.onerror = () => reject(filesRequest.error)
+      transaction.onerror = () => reject(transaction.error)
     })
   }
 
@@ -463,6 +473,51 @@ export class IndexedDBBackend implements FileSystemBackend {
   async copyFile(src: string, dest: string): Promise<void> {
     const content = await this.readBinary(src)
     await this.writeBinary(dest, content)
+  }
+
+  /**
+   * Read multiple files in a single transaction (more efficient for batch reads)
+   */
+  async readBinaryBatch(paths: string[]): Promise<Map<string, Uint8Array>> {
+    const db = await this.dbPromise
+    const results = new Map<string, Uint8Array>()
+
+    return new Promise((resolve, reject) => {
+      const transaction = db.transaction([IDB_FILES_STORE], 'readonly')
+      const store = transaction.objectStore(IDB_FILES_STORE)
+      let pending = paths.length
+
+      if (pending === 0) {
+        resolve(results)
+        return
+      }
+
+      for (const path of paths) {
+        const normalized = this.normalizePath(path)
+        const request = store.get(normalized)
+
+        request.onsuccess = () => {
+          const file = request.result as StoredFile | undefined
+          if (file) {
+            if (file.isBinary) {
+              results.set(path, file.content as Uint8Array)
+            } else {
+              const encoder = new TextEncoder()
+              results.set(path, encoder.encode(file.content as string))
+            }
+          }
+          pending--
+          if (pending === 0) resolve(results)
+        }
+
+        request.onerror = () => {
+          pending--
+          if (pending === 0) resolve(results)
+        }
+      }
+
+      transaction.onerror = () => reject(transaction.error)
+    })
   }
 }
 

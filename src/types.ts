@@ -1,10 +1,9 @@
 /**
  * FileSystem abstraction types
  *
- * This provides a unified interface for file operations that can be backed by:
- * - OPFS (Origin Private File System) - primary storage
- * - IndexedDB (transitional/legacy)
- * - LightningFS (for git operations)
+ * Provides a unified interface for file operations across different backends:
+ * - OPFS (Origin Private File System) - primary, fast storage
+ * - IndexedDB - fallback for browsers without OPFS support
  */
 
 export interface FileStats {
@@ -83,11 +82,6 @@ export type FileSystemEventHandler = (event: FileSystemEvent) => void
 export interface WriteOptions {
   /** Create parent directories if they don't exist */
   createParents?: boolean
-  /** Emit change event */
+  /** Skip emitting change event */
   silent?: boolean
-}
-
-export interface ReadOptions {
-  /** Encoding for text files (default: 'utf-8') */
-  encoding?: 'utf-8' | 'binary'
 }

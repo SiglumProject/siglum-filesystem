@@ -49,12 +49,17 @@ export function isOPFSAvailable(): boolean {
  * Test if OPFS write support works (Safari doesn't support createWritable)
  */
 async function testOPFSWriteSupport(): Promise<boolean> {
+  // Use unique filename to avoid race conditions
+  const testFileName = `.opfs-write-test-${Date.now()}-${Math.random().toString(36).slice(2)}`
+
   try {
     const root = await navigator.storage.getDirectory()
-    const testFile = await root.getFileHandle('.opfs-write-test', { create: true })
+    const testFile = await root.getFileHandle(testFileName, { create: true })
 
     // Safari doesn't support createWritable - this is what fails
     if (typeof (testFile as any).createWritable !== 'function') {
+      // Clean up even on failure path
+      try { await root.removeEntry(testFileName) } catch {}
       return false
     }
 
@@ -63,38 +68,66 @@ async function testOPFSWriteSupport(): Promise<boolean> {
     await writable.close()
 
     // Clean up test file
-    await root.removeEntry('.opfs-write-test')
+    try { await root.removeEntry(testFileName) } catch {}
     return true
-  } catch {
+  } catch (e) {
+    // Log the actual error for debugging
+    console.warn('[FileSystem] OPFS write test failed:', e)
     return false
   }
 }
 
+// Cache the best backend to ensure consistent behavior across all calls
+let cachedBestBackend: FileSystemBackend | null = null
+let bestBackendPromise: Promise<FileSystemBackend> | null = null
+
 /**
  * Get the best available backend based on browser support
+ * Result is cached to ensure consistent backend selection
  */
 export async function getBestBackend(): Promise<FileSystemBackend> {
-  // Lazy import to avoid circular dependencies
-  const { opfsBackend } = await import('./OPFSBackend')
-  const { indexedDBBackend } = await import('./IndexedDBBackend')
-
-  if (isOPFSAvailable()) {
-    // Verify OPFS actually works including write support
-    // Safari has OPFS read support but no createWritable() for writes
-    try {
-      const writeSupported = await testOPFSWriteSupport()
-      if (writeSupported) {
-        return opfsBackend
-      }
-      console.warn('[FileSystem] OPFS available but createWritable not supported, falling back to IndexedDB')
-      return indexedDBBackend
-    } catch {
-      console.warn('[FileSystem] OPFS available but failed, falling back to IndexedDB')
-      return indexedDBBackend
-    }
+  // Return cached result if available
+  if (cachedBestBackend) {
+    return cachedBestBackend
   }
 
-  return indexedDBBackend
+  // If a test is already in progress, wait for it
+  if (bestBackendPromise) {
+    return bestBackendPromise
+  }
+
+  // Run the test once and cache the result
+  bestBackendPromise = (async () => {
+    // Lazy import to avoid circular dependencies
+    const { opfsBackend } = await import('./OPFSBackend')
+    const { indexedDBBackend } = await import('./IndexedDBBackend')
+
+    if (isOPFSAvailable()) {
+      // Verify OPFS actually works including write support
+      // Safari has OPFS read support but no createWritable() for writes
+      try {
+        const writeSupported = await testOPFSWriteSupport()
+        if (writeSupported) {
+          cachedBestBackend = opfsBackend
+          console.log('[FileSystem] Using OPFS backend')
+          return opfsBackend
+        }
+        console.warn('[FileSystem] OPFS available but createWritable not supported, falling back to IndexedDB')
+        cachedBestBackend = indexedDBBackend
+        return indexedDBBackend
+      } catch {
+        console.warn('[FileSystem] OPFS available but failed, falling back to IndexedDB')
+        cachedBestBackend = indexedDBBackend
+        return indexedDBBackend
+      }
+    }
+
+    console.log('[FileSystem] Using IndexedDB backend')
+    cachedBestBackend = indexedDBBackend
+    return indexedDBBackend
+  })()
+
+  return bestBackendPromise
 }
 
 /**
@@ -241,10 +274,12 @@ export class FileSystemService {
       }
     }
 
-    const existed = await backend.exists(relativePath)
+    // Only check exists if we need to emit events
+    const shouldEmit = !options?.silent && this.eventHandlers.size > 0
+    const existed = shouldEmit ? await backend.exists(relativePath) : false
     await backend.writeFile(relativePath, content)
 
-    if (!options?.silent) {
+    if (shouldEmit) {
       this.emit({
         type: existed ? 'file:modified' : 'file:created',
         path: this.normalizePath(path)
@@ -262,10 +297,12 @@ export class FileSystemService {
       }
     }
 
-    const existed = await backend.exists(relativePath)
+    // Only check exists if we need to emit events
+    const shouldEmit = !options?.silent && this.eventHandlers.size > 0
+    const existed = shouldEmit ? await backend.exists(relativePath) : false
     await backend.writeBinary(relativePath, content)
 
-    if (!options?.silent) {
+    if (shouldEmit) {
       this.emit({
         type: existed ? 'file:modified' : 'file:created',
         path: this.normalizePath(path)
@@ -391,6 +428,73 @@ export class FileSystemService {
     } catch {
       return false
     }
+  }
+
+  /**
+   * Get the backend type for a given path
+   * Returns 'opfs', 'indexeddb', or null if not mounted
+   */
+  getBackendType(path: string): 'opfs' | 'indexeddb' | null {
+    try {
+      const { backend } = this.getBackendForPath(path)
+      return backend.name as 'opfs' | 'indexeddb'
+    } catch {
+      return null
+    }
+  }
+
+  /**
+   * Read multiple files in a single batch operation
+   * More efficient than individual reads for many small files
+   *
+   * @param paths - Array of file paths to read
+   * @returns Map of path -> Uint8Array (missing files are omitted)
+   */
+  async readBinaryBatch(paths: string[]): Promise<Map<string, Uint8Array>> {
+    const results = new Map<string, Uint8Array>()
+
+    // Group paths by backend for more efficient batch reads
+    const pathsByBackend = new Map<FileSystemBackend, Array<{ path: string; relativePath: string }>>()
+
+    for (const path of paths) {
+      try {
+        const { backend, relativePath } = this.getBackendForPath(path)
+        if (!pathsByBackend.has(backend)) {
+          pathsByBackend.set(backend, [])
+        }
+        pathsByBackend.get(backend)!.push({ path, relativePath })
+      } catch {
+        // Skip paths without mounted backends
+      }
+    }
+
+    // Read from each backend
+    for (const [backend, backendPaths] of pathsByBackend) {
+      // Check if backend supports batch reads
+      if ('readBinaryBatch' in backend && typeof backend.readBinaryBatch === 'function') {
+        const relativePaths = backendPaths.map(p => p.relativePath)
+        const batchResults = await (backend as any).readBinaryBatch(relativePaths)
+        for (const { path, relativePath } of backendPaths) {
+          const data = batchResults.get(relativePath)
+          if (data) {
+            results.set(path, data)
+          }
+        }
+      } else {
+        // Fall back to individual reads in parallel
+        const readPromises = backendPaths.map(async ({ path, relativePath }) => {
+          try {
+            const data = await backend.readBinary(relativePath)
+            results.set(path, data)
+          } catch {
+            // File doesn't exist, skip
+          }
+        })
+        await Promise.all(readPromises)
+      }
+    }
+
+    return results
   }
 }
 
