@@ -55,8 +55,7 @@ export type {
   FileSystemBackend,
   FileSystemEvent,
   FileSystemEventHandler,
-  WriteOptions,
-  ReadOptions
+  WriteOptions
 } from './types'
 
 export type { BackendPreference, MountOptions } from './FileSystemService'
@@ -73,3 +72,12 @@ export {
 // Backends
 export { OPFSBackend, opfsBackend } from './OPFSBackend'
 export { IndexedDBBackend, indexedDBBackend } from './IndexedDBBackend'
+
+// Storage constants (for direct access in workers)
+export {
+  IDB_NAME,
+  IDB_VERSION,
+  IDB_FILES_STORE,
+  IDB_DIRS_STORE,
+  OPFS_ROOT
+} from './constants'
