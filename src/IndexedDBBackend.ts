@@ -5,8 +5,8 @@
  * Stores files and directories in IndexedDB object stores.
  */
 
-import type { FileSystemBackend, FileStats, FileEntry } from './types'
-import { IDB_NAME, IDB_VERSION, IDB_FILES_STORE, IDB_DIRS_STORE } from './constants'
+import type { FileSystemBackend, FileStats, FileEntry, WriteBinaryBatchEntry, WriteBinaryBatchOptions } from './types.js'
+import { IDB_NAME, IDB_VERSION, IDB_FILES_STORE, IDB_DIRS_STORE } from './constants.js'
 
 interface StoredFile {
   path: string
@@ -518,6 +518,81 @@ export class IndexedDBBackend implements FileSystemBackend {
 
       transaction.onerror = () => reject(transaction.error)
     })
+  }
+
+  /**
+   * Write multiple files with progress reporting
+   * Uses batched transactions for efficiency
+   */
+  async writeBinaryBatch(
+    entries: WriteBinaryBatchEntry[],
+    options: WriteBinaryBatchOptions = {}
+  ): Promise<void> {
+    const { createParents = true, onProgress, concurrency = 20 } = options
+    const total = entries.length
+    let completed = 0
+
+    if (total === 0) {
+      onProgress?.(0, 0)
+      return
+    }
+
+    // Collect all parent directories that need to be created
+    if (createParents) {
+      const dirsToCreate = new Set<string>()
+      for (const { path } of entries) {
+        const normalized = this.normalizePath(path)
+        const parts = normalized.split('/').filter(Boolean)
+        parts.pop() // Remove filename
+        let currentPath = ''
+        for (const part of parts) {
+          currentPath += '/' + part
+          dirsToCreate.add(currentPath)
+        }
+      }
+      // Create all directories at once
+      for (const dir of dirsToCreate) {
+        await this.mkdir(dir)
+      }
+    }
+
+    const db = await this.dbPromise
+    const now = Date.now()
+
+    // Process in batches to avoid transaction size limits
+    for (let i = 0; i < entries.length; i += concurrency) {
+      const batch = entries.slice(i, i + concurrency)
+
+      await new Promise<void>((resolve, reject) => {
+        const transaction = db.transaction([IDB_FILES_STORE], 'readwrite')
+        const store = transaction.objectStore(IDB_FILES_STORE)
+        let pending = batch.length
+
+        for (const { path, content } of batch) {
+          const normalized = this.normalizePath(path)
+          const file: StoredFile = {
+            path: normalized,
+            content,
+            isBinary: true,
+            size: content.length,
+            mtime: now,
+            ctime: now
+          }
+
+          const request = store.put(file)
+          request.onsuccess = () => {
+            completed++
+            pending--
+            if (pending === 0) resolve()
+          }
+          request.onerror = () => reject(request.error)
+        }
+
+        transaction.onerror = () => reject(transaction.error)
+      })
+
+      onProgress?.(completed, total)
+    }
   }
 }
 
