@@ -8,7 +8,7 @@
  * - No serialization overhead
  */
 
-import type { FileSystemBackend, FileStats, FileEntry } from './types'
+import type { FileSystemBackend, FileStats, FileEntry, WriteBinaryBatchEntry, WriteBinaryBatchOptions } from './types.js'
 
 export class OPFSBackend implements FileSystemBackend {
   readonly name = 'opfs'
@@ -280,6 +280,76 @@ export class OPFSBackend implements FileSystemBackend {
     }
 
     return results
+  }
+
+  /**
+   * Write multiple files in parallel with directory handle caching
+   * Significantly faster than individual writes for large batches
+   */
+  async writeBinaryBatch(
+    entries: WriteBinaryBatchEntry[],
+    options: WriteBinaryBatchOptions = {}
+  ): Promise<void> {
+    const { createParents = true, onProgress, concurrency = 20 } = options
+    const total = entries.length
+    let completed = 0
+
+    if (total === 0) {
+      onProgress?.(0, 0)
+      return
+    }
+
+    // Cache directory handles for performance
+    const dirCache = new Map<string, FileSystemDirectoryHandle>()
+    const root = await this.getRoot()
+    dirCache.set('', root)
+
+    const getOrCreateDir = async (dirPath: string): Promise<FileSystemDirectoryHandle> => {
+      if (dirCache.has(dirPath)) {
+        return dirCache.get(dirPath)!
+      }
+
+      // Build path incrementally, caching each level
+      const parts = dirPath.split('/').filter(p => p)
+      let current = root
+      let currentPath = ''
+
+      for (const part of parts) {
+        currentPath = currentPath ? `${currentPath}/${part}` : part
+        if (dirCache.has(currentPath)) {
+          current = dirCache.get(currentPath)!
+        } else {
+          current = await current.getDirectoryHandle(part, { create: createParents })
+          dirCache.set(currentPath, current)
+        }
+      }
+
+      return current
+    }
+
+    // Process in batches to limit concurrent operations
+    for (let i = 0; i < entries.length; i += concurrency) {
+      const batch = entries.slice(i, i + concurrency)
+
+      await Promise.all(batch.map(async ({ path, content }) => {
+        const normalized = this.normalizePath(path)
+        const parts = normalized.split('/').filter(p => p)
+        const fileName = parts.pop()!
+        const dirPath = parts.join('/')
+
+        const dir = await getOrCreateDir(dirPath)
+        const handle = await dir.getFileHandle(fileName, { create: true })
+        const writable = await handle.createWritable()
+        await writable.write(content)
+        await writable.close()
+        completed++
+      }))
+
+      onProgress?.(completed, total)
+    }
+
+    // Clear cache to free memory
+    dirCache.clear()
   }
 }
 

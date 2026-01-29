@@ -62,6 +62,12 @@ export interface FileSystemBackend {
 
   /** Copy a file */
   copyFile(src: string, dest: string): Promise<void>
+
+  /** Batch write binary files with optional progress (optional) */
+  writeBinaryBatch?(
+    entries: WriteBinaryBatchEntry[],
+    options?: WriteBinaryBatchOptions
+  ): Promise<void>
 }
 
 /**
@@ -84,4 +90,28 @@ export interface WriteOptions {
   createParents?: boolean
   /** Skip emitting change event */
   silent?: boolean
+}
+
+/**
+ * Entry for batch write operations
+ */
+export interface WriteBinaryBatchEntry {
+  /** File path to write to */
+  path: string
+  /** Binary content to write */
+  content: Uint8Array
+}
+
+/**
+ * Options for batch write operations
+ */
+export interface WriteBinaryBatchOptions {
+  /** Create parent directories if they don't exist (default: true) */
+  createParents?: boolean
+  /** Skip emitting change events */
+  silent?: boolean
+  /** Progress callback: (completed, total) */
+  onProgress?: (completed: number, total: number) => void
+  /** Number of files to write in parallel (default: 20) */
+  concurrency?: number
 }

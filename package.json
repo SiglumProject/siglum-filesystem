@@ -2,6 +2,15 @@
   "name": "@siglum/filesystem",
   "version": "0.2.0",
   "description": "Unified filesystem abstraction for browser storage (OPFS, IndexedDB)",
+  "keywords": [
+    "filesystem",
+    "opfs",
+    "indexeddb",
+    "browser",
+    "storage",
+    "file-system",
+    "origin-private-file-system"
+  ],
   "type": "module",
   "main": "dist/index.js",
   "module": "dist/index.js",

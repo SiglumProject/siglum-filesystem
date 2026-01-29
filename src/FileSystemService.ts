@@ -22,7 +22,9 @@ import type {
   FileSystemEvent,
   FileSystemEventHandler,
   WriteOptions,
-} from './types'
+  WriteBinaryBatchEntry,
+  WriteBinaryBatchOptions,
+} from './types.js'
 
 interface MountPoint {
   path: string
@@ -99,8 +101,8 @@ export async function getBestBackend(): Promise<FileSystemBackend> {
   // Run the test once and cache the result
   bestBackendPromise = (async () => {
     // Lazy import to avoid circular dependencies
-    const { opfsBackend } = await import('./OPFSBackend')
-    const { indexedDBBackend } = await import('./IndexedDBBackend')
+    const { opfsBackend } = await import('./OPFSBackend.js')
+    const { indexedDBBackend } = await import('./IndexedDBBackend.js')
 
     if (isOPFSAvailable()) {
       // Verify OPFS actually works including write support
@@ -134,8 +136,8 @@ export async function getBestBackend(): Promise<FileSystemBackend> {
  * Get a specific backend by name
  */
 export async function getBackend(preference: BackendPreference): Promise<FileSystemBackend> {
-  const { opfsBackend } = await import('./OPFSBackend')
-  const { indexedDBBackend } = await import('./IndexedDBBackend')
+  const { opfsBackend } = await import('./OPFSBackend.js')
+  const { indexedDBBackend } = await import('./IndexedDBBackend.js')
 
   switch (preference) {
     case 'opfs':
@@ -495,6 +497,88 @@ export class FileSystemService {
     }
 
     return results
+  }
+
+  /**
+   * Write multiple files in a single batch operation
+   * Efficient for writing many files with progress reporting
+   *
+   * @param entries - Array of {path, content} entries to write
+   * @param options - Batch write options including progress callback
+   */
+  async writeBinaryBatch(
+    entries: WriteBinaryBatchEntry[],
+    options: WriteBinaryBatchOptions = {}
+  ): Promise<void> {
+    const total = entries.length
+    if (total === 0) {
+      options.onProgress?.(0, 0)
+      return
+    }
+
+    // Group entries by backend
+    const entriesByBackend = new Map<FileSystemBackend, WriteBinaryBatchEntry[]>()
+    const mountPathByBackend = new Map<FileSystemBackend, string>()
+
+    for (const entry of entries) {
+      try {
+        const { backend, relativePath } = this.getBackendForPath(entry.path)
+        if (!entriesByBackend.has(backend)) {
+          entriesByBackend.set(backend, [])
+          // Store the mount's relative path conversion for this backend
+          const mount = this.mounts.find(m => m.backend === backend)
+          mountPathByBackend.set(backend, mount?.path || '/')
+        }
+        // Convert to relative path for the backend
+        entriesByBackend.get(backend)!.push({ path: relativePath, content: entry.content })
+      } catch {
+        // Skip entries without mounted backends
+      }
+    }
+
+    let completed = 0
+
+    // Write to each backend
+    for (const [backend, backendEntries] of entriesByBackend) {
+      const startCompleted = completed
+
+      // Check if backend supports batch writes
+      if (backend.writeBinaryBatch) {
+        await backend.writeBinaryBatch(backendEntries, {
+          ...options,
+          onProgress: (c, _t) => {
+            completed = startCompleted + c
+            options.onProgress?.(completed, total)
+          }
+        })
+        completed = startCompleted + backendEntries.length
+      } else {
+        // Fall back to sequential writes with createParents
+        const { createParents = true, concurrency = 20 } = options
+
+        for (let i = 0; i < backendEntries.length; i += concurrency) {
+          const batch = backendEntries.slice(i, i + concurrency)
+          await Promise.all(batch.map(async ({ path, content }) => {
+            if (createParents) {
+              const parentPath = this.getParentPath(path)
+              if (parentPath !== '/') {
+                await backend.mkdir(parentPath)
+              }
+            }
+            await backend.writeBinary(path, content)
+            completed++
+          }))
+          options.onProgress?.(completed, total)
+        }
+      }
+    }
+
+    // Emit events if not silent
+    if (!options.silent && this.eventHandlers.size > 0) {
+      for (const entry of entries) {
+        this.emit({ type: 'file:created', path: this.normalizePath(entry.path) })
+      }
+    }
   }
 }
 

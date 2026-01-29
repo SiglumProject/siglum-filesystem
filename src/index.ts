@@ -55,10 +55,12 @@ export type {
   FileSystemBackend,
   FileSystemEvent,
   FileSystemEventHandler,
-  WriteOptions
-} from './types'
+  WriteOptions,
+  WriteBinaryBatchEntry,
+  WriteBinaryBatchOptions
+} from './types.js'
 
-export type { BackendPreference, MountOptions } from './FileSystemService'
+export type { BackendPreference, MountOptions } from './FileSystemService.js'
 
 // Service and helpers
 export {
@@ -67,11 +69,11 @@ export {
   isOPFSAvailable,
   getBestBackend,
   getBackend
-} from './FileSystemService'
+} from './FileSystemService.js'
 
 // Backends
-export { OPFSBackend, opfsBackend } from './OPFSBackend'
-export { IndexedDBBackend, indexedDBBackend } from './IndexedDBBackend'
+export { OPFSBackend, opfsBackend } from './OPFSBackend.js'
+export { IndexedDBBackend, indexedDBBackend } from './IndexedDBBackend.js'
 
 // Storage constants (for direct access in workers)
 export {
@@ -80,4 +82,4 @@ export {
   IDB_FILES_STORE,
   IDB_DIRS_STORE,
   OPFS_ROOT
-} from './constants'
+} from './constants.js'

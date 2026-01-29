@@ -84,6 +84,21 @@ const results = await fileSystem.readBinaryBatch(paths)
 // Returns Map<string, Uint8Array> - missing files are omitted
 ```
 
+For writing multiple files with progress tracking:
+
+```typescript
+const entries = [
+  { path: '/documents/a.txt', content: new Uint8Array([1, 2, 3]) },
+  { path: '/documents/b.txt', content: new Uint8Array([4, 5, 6]) },
+]
+
+await fileSystem.writeBinaryBatch(entries, {
+  createParents: true,
+  onProgress: (completed, total) => console.log(`${completed}/${total}`),
+  concurrency: 20,  // parallel writes (default: 20)
+})
+```
+
 ## Web Worker Support
 
 For accessing the filesystem from Web Workers (including classic workers that can't use ES modules):
@@ -151,6 +166,7 @@ Fallback for browsers without OPFS support.
 - `readBinary(path)` - Read binary data
 - `writeBinary(path, data, options?)` - Write binary data
 - `readBinaryBatch(paths)` - Read multiple files efficiently (returns `Map<string, Uint8Array>`)
+- `writeBinaryBatch(entries, options?)` - Write multiple files with progress tracking
 - `deleteFile(path)` - Delete a file
 - `copyFile(src, dest)` - Copy a file
 - `rename(oldPath, newPath)` - Rename or move a file
