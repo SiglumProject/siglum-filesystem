@@ -17,12 +17,12 @@
   "types": "dist/index.d.ts",
   "exports": {
     ".": {
-      "import": "./dist/index.js",
-      "types": "./dist/index.d.ts"
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
     },
     "./constants": {
-      "import": "./dist/constants.js",
-      "types": "./dist/constants.d.ts"
+      "types": "./dist/constants.d.ts",
+      "import": "./dist/constants.js"
     },
     "./IndexedDBBackend": {
       "types": "./dist/IndexedDBBackend.d.ts",
@@ -52,5 +52,8 @@
   },
   "dependencies": {
     "fflate": "^0.8.2"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }
