@@ -25,6 +25,11 @@ import type {
   WriteBinaryBatchEntry,
   WriteBinaryBatchOptions,
 } from './types.js'
+import {
+  compress,
+  autoCompress,
+  autoDecompress
+} from './compression.js'
 
 interface MountPoint {
   path: string
@@ -36,6 +41,8 @@ export type BackendPreference = 'opfs' | 'indexeddb' | 'auto'
 export interface MountOptions {
   /** Which backend to use: 'opfs', 'indexeddb', or 'auto' (default: 'auto') */
   backend?: BackendPreference
+  /** OPFS namespace — creates an isolated storage root (default: 'siglum-files') */
+  namespace?: string
 }
 
 /**
@@ -100,30 +107,26 @@ export async function getBestBackend(): Promise<FileSystemBackend> {
 
   // Run the test once and cache the result
   bestBackendPromise = (async () => {
-    // Lazy import to avoid circular dependencies
-    const { opfsBackend } = await import('./OPFSBackend.js')
-    const { indexedDBBackend } = await import('./IndexedDBBackend.js')
-
     if (isOPFSAvailable()) {
       // Verify OPFS actually works including write support
       // Safari has OPFS read support but no createWritable() for writes
       try {
         const writeSupported = await testOPFSWriteSupport()
         if (writeSupported) {
+          // Only import OPFS backend when we know it works
+          const { opfsBackend } = await import('./OPFSBackend.js')
           cachedBestBackend = opfsBackend
           console.log('[FileSystem] Using OPFS backend')
           return opfsBackend
         }
         console.warn('[FileSystem] OPFS available but createWritable not supported, falling back to IndexedDB')
-        cachedBestBackend = indexedDBBackend
-        return indexedDBBackend
       } catch {
         console.warn('[FileSystem] OPFS available but failed, falling back to IndexedDB')
-        cachedBestBackend = indexedDBBackend
-        return indexedDBBackend
       }
     }
 
+    // Only import IndexedDB backend when we actually need it
+    const { indexedDBBackend } = await import('./IndexedDBBackend.js')
     console.log('[FileSystem] Using IndexedDB backend')
     cachedBestBackend = indexedDBBackend
     return indexedDBBackend
@@ -136,17 +139,18 @@ export async function getBestBackend(): Promise<FileSystemBackend> {
  * Get a specific backend by name
  */
 export async function getBackend(preference: BackendPreference): Promise<FileSystemBackend> {
-  const { opfsBackend } = await import('./OPFSBackend.js')
-  const { indexedDBBackend } = await import('./IndexedDBBackend.js')
-
   switch (preference) {
-    case 'opfs':
+    case 'opfs': {
       if (!isOPFSAvailable()) {
         throw new Error('OPFS is not available in this browser')
       }
+      const { opfsBackend } = await import('./OPFSBackend.js')
       return opfsBackend
-    case 'indexeddb':
+    }
+    case 'indexeddb': {
+      const { indexedDBBackend } = await import('./IndexedDBBackend.js')
       return indexedDBBackend
+    }
     case 'auto':
     default:
       return getBestBackend()
@@ -194,7 +198,20 @@ export class FileSystemService {
    */
   async mountAuto(path: string, options: MountOptions = {}): Promise<FileSystemBackend> {
     const preference = options.backend ?? 'auto'
-    const backend = await getBackend(preference)
+    let backend = await getBackend(preference)
+
+    // Namespaces isolate storage; they must not bypass backend selection or fallback.
+    if (options.namespace) {
+      if (backend.name === 'opfs') {
+        const { OPFSBackend } = await import('./OPFSBackend.js')
+        backend = new OPFSBackend(options.namespace)
+      } else {
+        const { IndexedDBBackend } = await import('./IndexedDBBackend.js')
+        const { IDB_NAME } = await import('./constants.js')
+        backend = new IndexedDBBackend(`${IDB_NAME}-${options.namespace}`)
+      }
+    }
+
     this.mount(path, backend)
     return backend
   }
@@ -261,9 +278,16 @@ export class FileSystemService {
     return backend.readFile(relativePath)
   }
 
-  async readBinary(path: string): Promise<Uint8Array> {
+  async readBinary(path: string, options?: { autoDecompress?: boolean }): Promise<Uint8Array> {
     const { backend, relativePath } = this.getBackendForPath(path)
-    return backend.readBinary(relativePath)
+    const data = await backend.readBinary(relativePath)
+
+    // Auto-decompress if enabled (default: true) and data looks like gzip
+    if (options?.autoDecompress !== false) {
+      return autoDecompress(data)
+    }
+
+    return data
   }
 
   async writeFile(path: string, content: string, options?: WriteOptions): Promise<void> {
@@ -299,10 +323,19 @@ export class FileSystemService {
       }
     }
 
+    // Handle compression
+    let finalContent = content
+    if (options?.compress === true) {
+      finalContent = await compress(content)
+    } else if (options?.compress === 'auto') {
+      const result = await autoCompress(content)
+      finalContent = result.data
+    }
+
     // Only check exists if we need to emit events
     const shouldEmit = !options?.silent && this.eventHandlers.size > 0
     const existed = shouldEmit ? await backend.exists(relativePath) : false
-    await backend.writeBinary(relativePath, content)
+    await backend.writeBinary(relativePath, finalContent)
 
     if (shouldEmit) {
       this.emit({
@@ -363,9 +396,7 @@ export class FileSystemService {
     const normalizedMountPath = this.normalizePath(path)
     return entries.map(entry => ({
       ...entry,
-      path: normalizedMountPath === '/'
-        ? entry.path
-        : normalizedMountPath + entry.path.slice(1)
+      path: (normalizedMountPath === '/' ? '' : normalizedMountPath) + '/' + entry.name
     }))
   }
 
@@ -374,6 +405,31 @@ export class FileSystemService {
   async rename(oldPath: string, newPath: string): Promise<void> {
     const oldBackend = this.getBackendForPath(oldPath)
     const newBackend = this.getBackendForPath(newPath)
+    const source = this.normalizePath(oldPath)
+    const destination = this.normalizePath(newPath)
+    if (source === destination) return
+
+    const stats = await oldBackend.backend.stat(oldBackend.relativePath)
+    if (stats.isDirectory) {
+      if (oldBackend.relativePath === '/' || destination.startsWith(source + '/')) {
+        throw new Error('EINVAL: cannot move a mounted root or a directory into itself')
+      }
+      if (await this.exists(destination)) throw new Error(`EEXIST: destination already exists: ${destination}`)
+      const copyDirectory = async (from: string, to: string): Promise<void> => {
+        await this.mkdir(to, { silent: true })
+        for (const entry of await this.readdir(from)) {
+          const target = to + '/' + entry.name
+          if (entry.isDirectory) await copyDirectory(entry.path, target)
+          else await this.copyFile(entry.path, target)
+        }
+      }
+      // Keep the complete source until every destination write has succeeded.
+      await copyDirectory(source, destination)
+      await this.rmdir(source, { recursive: true, silent: true })
+      this.emit({ type: 'directory:deleted', path: source })
+      this.emit({ type: 'directory:created', path: destination })
+      return
+    }
 
     if (oldBackend.backend !== newBackend.backend) {
       // Cross-backend move: copy + delete

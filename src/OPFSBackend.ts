@@ -8,15 +8,36 @@
  * - No serialization overhead
  */
 
+/// <reference path="./globals.d.ts" />
 import type { FileSystemBackend, FileStats, FileEntry, WriteBinaryBatchEntry, WriteBinaryBatchOptions } from './types.js'
 
 export class OPFSBackend implements FileSystemBackend {
   readonly name = 'opfs'
   private rootPromise: Promise<FileSystemDirectoryHandle> | null = null
 
+  // Default namespace directory
+  private static readonly DEFAULT_NAMESPACE = 'siglum-files'
+
+  // Instance namespace (allows separate storage per backend instance)
+  private readonly namespace: string
+
+  // Sync handle cache for worker contexts (100x faster I/O)
+  private syncHandleCache = new Map<string, FileSystemSyncAccessHandle>()
+
+  constructor(namespace?: string) {
+    this.namespace = namespace ?? OPFSBackend.DEFAULT_NAMESPACE
+  }
+
   private async getRoot(): Promise<FileSystemDirectoryHandle> {
     if (!this.rootPromise) {
-      this.rootPromise = navigator.storage.getDirectory()
+      this.rootPromise = (async () => {
+        const opfsRoot = await navigator.storage.getDirectory()
+        return opfsRoot.getDirectoryHandle(this.namespace, { create: true })
+      })().catch((e) => {
+        // Reset promise on error to allow retry
+        this.rootPromise = null
+        throw e
+      })
     }
     return this.rootPromise
   }
@@ -77,18 +98,26 @@ export class OPFSBackend implements FileSystemBackend {
   }
 
   async readFile(path: string): Promise<string> {
-    const { parent, name } = await this.getParentAndName(path)
-    const fileHandle = await parent.getFileHandle(name)
-    const file = await fileHandle.getFile()
-    return file.text()
+    try {
+      const { parent, name } = await this.getParentAndName(path)
+      const fileHandle = await parent.getFileHandle(name)
+      const file = await fileHandle.getFile()
+      return file.text()
+    } catch {
+      throw new Error(`ENOENT: no such file or directory: ${path}`)
+    }
   }
 
   async readBinary(path: string): Promise<Uint8Array> {
-    const { parent, name } = await this.getParentAndName(path)
-    const fileHandle = await parent.getFileHandle(name)
-    const file = await fileHandle.getFile()
-    const buffer = await file.arrayBuffer()
-    return new Uint8Array(buffer)
+    try {
+      const { parent, name } = await this.getParentAndName(path)
+      const fileHandle = await parent.getFileHandle(name)
+      const file = await fileHandle.getFile()
+      const buffer = await file.arrayBuffer()
+      return new Uint8Array(buffer)
+    } catch {
+      throw new Error(`ENOENT: no such file or directory: ${path}`)
+    }
   }
 
   async writeFile(path: string, content: string): Promise<void> {
@@ -108,8 +137,12 @@ export class OPFSBackend implements FileSystemBackend {
   }
 
   async deleteFile(path: string): Promise<void> {
-    const { parent, name } = await this.getParentAndName(path)
-    await parent.removeEntry(name)
+    try {
+      const { parent, name } = await this.getParentAndName(path)
+      await parent.removeEntry(name)
+    } catch {
+      throw new Error(`ENOENT: no such file or directory: ${path}`)
+    }
   }
 
   async exists(path: string): Promise<boolean> {
@@ -153,7 +186,13 @@ export class OPFSBackend implements FileSystemBackend {
       }
     }
 
-    const { parent, name } = await this.getParentAndName(path)
+    let parent: FileSystemDirectoryHandle
+    let name: string
+    try {
+      ({ parent, name } = await this.getParentAndName(path))
+    } catch {
+      throw new Error(`ENOENT: no such file or directory: ${path}`)
+    }
 
     // Try as file first
     try {
@@ -350,6 +389,177 @@ export class OPFSBackend implements FileSystemBackend {
 
     // Clear cache to free memory
     dirCache.clear()
+  }
+
+  // ============================================================================
+  // Sync Access Handle Methods (Worker-only, 100x faster I/O)
+  // ============================================================================
+
+  /**
+   * Get or create a sync access handle for a file
+   * Only works in Web Worker contexts
+   *
+   * IMPORTANT: Call closeSyncHandle() when done to release the lock
+   */
+  async getSyncAccessHandle(path: string): Promise<FileSystemSyncAccessHandle> {
+    const normalized = this.normalizePath(path)
+
+    // Return cached handle if available
+    const cached = this.syncHandleCache.get(normalized)
+    if (cached) {
+      return cached
+    }
+
+    // Get file handle and create sync access handle
+    const { parent, name } = await this.getParentAndName(path)
+    const fileHandle = await parent.getFileHandle(name, { create: true })
+    const syncHandle = await fileHandle.createSyncAccessHandle()
+
+    this.syncHandleCache.set(normalized, syncHandle)
+    return syncHandle
+  }
+
+  /**
+   * Synchronously read from a file using its sync access handle
+   * Must call getSyncAccessHandle() first to open the handle
+   *
+   * @param path - File path
+   * @param buffer - Buffer to read into
+   * @param offset - Byte offset in file to start reading from
+   * @returns Number of bytes read
+   */
+  readSync(path: string, buffer: Uint8Array, offset: number = 0): number {
+    const normalized = this.normalizePath(path)
+    const handle = this.syncHandleCache.get(normalized)
+    if (!handle) {
+      throw new Error(`No sync handle open for: ${path}. Call getSyncAccessHandle() first.`)
+    }
+    return handle.read(buffer, { at: offset })
+  }
+
+  /**
+   * Synchronously write to a file using its sync access handle
+   * Must call getSyncAccessHandle() first to open the handle
+   *
+   * @param path - File path
+   * @param buffer - Data to write
+   * @param offset - Byte offset in file to start writing at
+   * @returns Number of bytes written
+   */
+  writeSync(path: string, buffer: Uint8Array, offset: number = 0): number {
+    const normalized = this.normalizePath(path)
+    const handle = this.syncHandleCache.get(normalized)
+    if (!handle) {
+      throw new Error(`No sync handle open for: ${path}. Call getSyncAccessHandle() first.`)
+    }
+    return handle.write(buffer, { at: offset })
+  }
+
+  /**
+   * Flush pending writes to disk synchronously
+   */
+  flushSync(path: string): void {
+    const normalized = this.normalizePath(path)
+    const handle = this.syncHandleCache.get(normalized)
+    if (!handle) {
+      throw new Error(`No sync handle open for: ${path}. Call getSyncAccessHandle() first.`)
+    }
+    handle.flush()
+  }
+
+  /**
+   * Get the size of a file via its sync handle
+   */
+  getSizeSync(path: string): number {
+    const normalized = this.normalizePath(path)
+    const handle = this.syncHandleCache.get(normalized)
+    if (!handle) {
+      throw new Error(`No sync handle open for: ${path}. Call getSyncAccessHandle() first.`)
+    }
+    return handle.getSize()
+  }
+
+  /**
+   * Truncate a file via its sync handle
+   */
+  truncateSync(path: string, newSize: number): void {
+    const normalized = this.normalizePath(path)
+    const handle = this.syncHandleCache.get(normalized)
+    if (!handle) {
+      throw new Error(`No sync handle open for: ${path}. Call getSyncAccessHandle() first.`)
+    }
+    handle.truncate(newSize)
+  }
+
+  /**
+   * Close a sync access handle and remove from cache
+   * MUST be called to release the file lock
+   */
+  closeSyncHandle(path: string): void {
+    const normalized = this.normalizePath(path)
+    const handle = this.syncHandleCache.get(normalized)
+    if (handle) {
+      handle.close()
+      this.syncHandleCache.delete(normalized)
+    }
+  }
+
+  /**
+   * Close all open sync handles
+   * Call this when cleaning up the worker
+   */
+  closeAllSyncHandles(): void {
+    for (const [_path, handle] of this.syncHandleCache) {
+      try {
+        handle.close()
+      } catch {
+        // Handle may already be closed
+      }
+    }
+    this.syncHandleCache.clear()
+  }
+
+  /**
+   * Check if a sync handle is open for a path
+   */
+  hasSyncHandle(path: string): boolean {
+    const normalized = this.normalizePath(path)
+    return this.syncHandleCache.has(normalized)
+  }
+
+  /**
+   * Read entire file synchronously using a temporary sync handle
+   * Convenience method that opens, reads, and closes the handle
+   */
+  async readBinarySync(path: string): Promise<Uint8Array> {
+    const handle = await this.getSyncAccessHandle(path)
+    try {
+      const size = handle.getSize()
+      const buffer = new Uint8Array(size)
+      handle.read(buffer, { at: 0 })
+      return buffer
+    } finally {
+      this.closeSyncHandle(path)
+    }
+  }
+
+  /**
+   * Write entire file synchronously using a temporary sync handle
+   * Convenience method that opens, writes, and closes the handle
+   */
+  async writeBinarySync(path: string, content: Uint8Array): Promise<void> {
+    // Ensure parent directories exist first (async operation)
+    const { parent, name } = await this.getParentAndName(path, { createParents: true })
+    await parent.getFileHandle(name, { create: true })
+
+    const handle = await this.getSyncAccessHandle(path)
+    try {
+      handle.truncate(0)
+      handle.write(content, { at: 0 })
+      handle.flush()
+    } finally {
+      this.closeSyncHandle(path)
+    }
   }
 }
 

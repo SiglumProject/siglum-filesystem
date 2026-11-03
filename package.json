@@ -1,6 +1,6 @@
 {
   "name": "@siglum/filesystem",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "description": "Unified filesystem abstraction for browser storage (OPFS, IndexedDB)",
   "keywords": [
     "filesystem",
@@ -20,13 +20,13 @@
       "import": "./dist/index.js",
       "types": "./dist/index.d.ts"
     },
-    "./worker": {
-      "import": "./dist/worker.js",
-      "types": "./dist/worker.d.ts"
-    },
     "./constants": {
       "import": "./dist/constants.js",
       "types": "./dist/constants.d.ts"
+    },
+    "./IndexedDBBackend": {
+      "types": "./dist/IndexedDBBackend.d.ts",
+      "import": "./dist/IndexedDBBackend.js"
     }
   },
   "files": [
@@ -49,5 +49,8 @@
   "repository": {
     "type": "git",
     "url": "https://github.com/SiglumProject/siglum-filesystem"
+  },
+  "dependencies": {
+    "fflate": "^0.8.2"
   }
 }

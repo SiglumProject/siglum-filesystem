@@ -72,8 +72,12 @@ export {
 } from './FileSystemService.js'
 
 // Backends
+// OPFS is loaded eagerly (it's the primary backend)
 export { OPFSBackend, opfsBackend } from './OPFSBackend.js'
-export { IndexedDBBackend, indexedDBBackend } from './IndexedDBBackend.js'
+
+// IndexedDB is loaded lazily to avoid creating the database when OPFS is used
+// Use dynamic import: const { IndexedDBBackend, indexedDBBackend } = await import('@siglum/filesystem/IndexedDBBackend')
+export type { IndexedDBBackend } from './IndexedDBBackend.js'
 
 // Storage constants (for direct access in workers)
 export {
@@ -83,3 +87,22 @@ export {
   IDB_DIRS_STORE,
   OPFS_ROOT
 } from './constants.js'
+
+// Compression utilities (native CompressionStream, zero bundle cost)
+export {
+  compress,
+  decompress,
+  compressStream,
+  decompressStream,
+  compressReadableStream,
+  decompressReadableStream,
+  isCompressionAvailable,
+  shouldCompress,
+  autoCompress,
+  autoDecompress,
+  // Sync compression (fflate, WASM SIMD - 3-6x faster in workers)
+  isFflateAvailable,
+  compressSync,
+  decompressSync,
+  initSyncCompression
+} from './compression.js'

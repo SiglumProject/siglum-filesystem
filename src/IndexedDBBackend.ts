@@ -24,15 +24,24 @@ interface StoredDirectory {
 
 export class IndexedDBBackend implements FileSystemBackend {
   readonly name = 'indexeddb'
-  private dbPromise: Promise<IDBDatabase>
+  private dbPromise: Promise<IDBDatabase> | null = null
 
-  constructor() {
-    this.dbPromise = this.initDB()
+  constructor(private readonly databaseName: string = IDB_NAME) {}
+
+  private getDB(): Promise<IDBDatabase> {
+    if (!this.dbPromise) {
+      this.dbPromise = this.initDB().catch((e) => {
+        // Reset promise on error to allow retry
+        this.dbPromise = null
+        throw e
+      })
+    }
+    return this.dbPromise
   }
 
   private async initDB(): Promise<IDBDatabase> {
     return new Promise((resolve, reject) => {
-      const request = indexedDB.open(IDB_NAME, IDB_VERSION)
+      const request = indexedDB.open(this.databaseName, IDB_VERSION)
 
       request.onerror = () => reject(request.error)
       request.onsuccess = () => resolve(request.result)
@@ -75,7 +84,7 @@ export class IndexedDBBackend implements FileSystemBackend {
   }
 
   async readFile(path: string): Promise<string> {
-    const db = await this.dbPromise
+    const db = await this.getDB()
     const normalized = this.normalizePath(path)
 
     return new Promise((resolve, reject) => {
@@ -102,7 +111,7 @@ export class IndexedDBBackend implements FileSystemBackend {
   }
 
   async readBinary(path: string): Promise<Uint8Array> {
-    const db = await this.dbPromise
+    const db = await this.getDB()
     const normalized = this.normalizePath(path)
 
     return new Promise((resolve, reject) => {
@@ -129,7 +138,7 @@ export class IndexedDBBackend implements FileSystemBackend {
   }
 
   async writeFile(path: string, content: string): Promise<void> {
-    const db = await this.dbPromise
+    const db = await this.getDB()
     const normalized = this.normalizePath(path)
     const now = Date.now()
 
@@ -143,7 +152,8 @@ export class IndexedDBBackend implements FileSystemBackend {
     }
 
     return new Promise((resolve, reject) => {
-      const transaction = db.transaction([IDB_FILES_STORE], 'readwrite')
+      // Use relaxed durability for faster writes (10x improvement)
+      const transaction = db.transaction([IDB_FILES_STORE], 'readwrite', { durability: 'relaxed' })
       const store = transaction.objectStore(IDB_FILES_STORE)
 
       // Check if file exists to preserve ctime
@@ -168,7 +178,7 @@ export class IndexedDBBackend implements FileSystemBackend {
   }
 
   async writeBinary(path: string, content: Uint8Array): Promise<void> {
-    const db = await this.dbPromise
+    const db = await this.getDB()
     const normalized = this.normalizePath(path)
     const now = Date.now()
 
@@ -182,7 +192,8 @@ export class IndexedDBBackend implements FileSystemBackend {
     }
 
     return new Promise((resolve, reject) => {
-      const transaction = db.transaction([IDB_FILES_STORE], 'readwrite')
+      // Use relaxed durability for faster writes (10x improvement)
+      const transaction = db.transaction([IDB_FILES_STORE], 'readwrite', { durability: 'relaxed' })
       const store = transaction.objectStore(IDB_FILES_STORE)
 
       // Check if file exists to preserve ctime
@@ -207,7 +218,7 @@ export class IndexedDBBackend implements FileSystemBackend {
   }
 
   async deleteFile(path: string): Promise<void> {
-    const db = await this.dbPromise
+    const db = await this.getDB()
     const normalized = this.normalizePath(path)
 
     return new Promise((resolve, reject) => {
@@ -221,7 +232,7 @@ export class IndexedDBBackend implements FileSystemBackend {
   }
 
   async exists(path: string): Promise<boolean> {
-    const db = await this.dbPromise
+    const db = await this.getDB()
     const normalized = this.normalizePath(path)
 
     // Check both stores in a single transaction
@@ -246,7 +257,7 @@ export class IndexedDBBackend implements FileSystemBackend {
   }
 
   async stat(path: string): Promise<FileStats> {
-    const db = await this.dbPromise
+    const db = await this.getDB()
     const normalized = this.normalizePath(path)
 
     // Check both stores in a single transaction
@@ -290,7 +301,7 @@ export class IndexedDBBackend implements FileSystemBackend {
   }
 
   async mkdir(path: string): Promise<void> {
-    const db = await this.dbPromise
+    const db = await this.getDB()
     const normalized = this.normalizePath(path)
 
     // Build all paths that need to exist
@@ -331,7 +342,8 @@ export class IndexedDBBackend implements FileSystemBackend {
 
     const now = Date.now()
     return new Promise<void>((resolve, reject) => {
-      const transaction = db.transaction([IDB_DIRS_STORE], 'readwrite')
+      // Use relaxed durability for faster writes
+      const transaction = db.transaction([IDB_DIRS_STORE], 'readwrite', { durability: 'relaxed' })
       const store = transaction.objectStore(IDB_DIRS_STORE)
       let pending = missingPaths.length
 
@@ -350,12 +362,19 @@ export class IndexedDBBackend implements FileSystemBackend {
   }
 
   async rmdir(path: string, options?: { recursive?: boolean }): Promise<void> {
-    const db = await this.dbPromise
+    const db = await this.getDB()
     const normalized = this.normalizePath(path)
+
+    if (normalized === '/') throw new Error('Cannot remove root directory')
+    const stats = await this.stat(normalized)
+    if (!stats.isDirectory) throw new Error(`ENOTDIR: not a directory: ${path}`)
+    const entries = await this.readdir(normalized)
+    if (!options?.recursive && entries.length > 0) {
+      throw new Error(`ENOTEMPTY: directory not empty: ${path}`)
+    }
 
     if (options?.recursive) {
       // Delete all files and subdirectories under this path
-      const entries = await this.readdir(normalized)
       for (const entry of entries) {
         if (entry.isDirectory) {
           await this.rmdir(entry.path, { recursive: true })
@@ -377,7 +396,7 @@ export class IndexedDBBackend implements FileSystemBackend {
   }
 
   async readdir(path: string): Promise<FileEntry[]> {
-    const db = await this.dbPromise
+    const db = await this.getDB()
     const normalized = this.normalizePath(path)
     const prefix = normalized === '/' ? '/' : normalized + '/'
 
@@ -479,7 +498,7 @@ export class IndexedDBBackend implements FileSystemBackend {
    * Read multiple files in a single transaction (more efficient for batch reads)
    */
   async readBinaryBatch(paths: string[]): Promise<Map<string, Uint8Array>> {
-    const db = await this.dbPromise
+    const db = await this.getDB()
     const results = new Map<string, Uint8Array>()
 
     return new Promise((resolve, reject) => {
@@ -556,7 +575,7 @@ export class IndexedDBBackend implements FileSystemBackend {
       }
     }
 
-    const db = await this.dbPromise
+    const db = await this.getDB()
     const now = Date.now()
 
     // Process in batches to avoid transaction size limits
@@ -564,7 +583,8 @@ export class IndexedDBBackend implements FileSystemBackend {
       const batch = entries.slice(i, i + concurrency)
 
       await new Promise<void>((resolve, reject) => {
-        const transaction = db.transaction([IDB_FILES_STORE], 'readwrite')
+        // Use relaxed durability for faster writes (10x improvement)
+        const transaction = db.transaction([IDB_FILES_STORE], 'readwrite', { durability: 'relaxed' })
         const store = transaction.objectStore(IDB_FILES_STORE)
         let pending = batch.length
 

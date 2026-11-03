@@ -90,6 +90,13 @@ export interface WriteOptions {
   createParents?: boolean
   /** Skip emitting change event */
   silent?: boolean
+  /**
+   * Compress the data before writing (gzip)
+   * - true: always compress
+   * - false: never compress (default)
+   * - 'auto': compress only if beneficial (checks file type and entropy)
+   */
+  compress?: boolean | 'auto'
 }
 
 /**
