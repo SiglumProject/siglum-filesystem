@@ -54,3 +54,14 @@ test('directory rename preserves nested binary files and rejects moving into its
  expect(await fs.readBinary(path + '/new/nested/image.bin')).toEqual(bytes)
  expect(await fs.exists(path + '/old')).toBe(false)
 })
+
+
+test('IndexedDB mounted root exists without an explicit directory record', async () => {
+ const backend = new IndexedDBBackend('root-stat-regression')
+ const fs = new FileSystemService(); fs.mount('/git', backend)
+ expect(await fs.exists('/git')).toBe(true)
+ expect(await fs.stat('/git')).toMatchObject({isDirectory:true,isFile:false,size:0})
+ await fs.writeFile('/git/main.tex','local draft',{createParents:true})
+ expect(await fs.stat('/git/')).toMatchObject({isDirectory:true,isFile:false})
+ expect(await fs.readFile('/git/main.tex')).toBe('local draft')
+})

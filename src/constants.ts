@@ -15,3 +15,6 @@ export const IDB_DIRS_STORE = 'directories'
 // OPFS root path constants
 // These are the paths used by siglum-filesystem in OPFS
 export const OPFS_ROOT = '' // Empty string = navigator.storage.getDirectory()
+
+// Storage location confirmed for this origin; shared with session restoration.
+export const BACKEND_STORAGE_KEY = 'siglum-filesystem-backend'
