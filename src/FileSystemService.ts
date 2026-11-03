@@ -15,6 +15,8 @@
  *   /output/     -> OPFSBackend (compiled PDFs)
  */
 
+import { BACKEND_STORAGE_KEY } from './constants.js'
+
 import type {
   FileSystemBackend,
   FileStats,
@@ -86,51 +88,66 @@ async function testOPFSWriteSupport(): Promise<boolean> {
   }
 }
 
-// Cache the best backend to ensure consistent behavior across all calls
+// Keep the same storage location across reloads. A transient OPFS failure must
+// not make an existing project appear empty by silently opening IndexedDB instead.
 let cachedBestBackend: FileSystemBackend | null = null
 let bestBackendPromise: Promise<FileSystemBackend> | null = null
 
-/**
- * Get the best available backend based on browser support
- * Result is cached to ensure consistent backend selection
- */
-export async function getBestBackend(): Promise<FileSystemBackend> {
-  // Return cached result if available
-  if (cachedBestBackend) {
-    return cachedBestBackend
-  }
+function savedBackend(): 'opfs' | 'indexeddb' | null {
+  try {
+    const value = localStorage.getItem(BACKEND_STORAGE_KEY)
+    return value === 'opfs' || value === 'indexeddb' ? value : null
+  } catch { return null }
+}
 
-  // If a test is already in progress, wait for it
-  if (bestBackendPromise) {
-    return bestBackendPromise
-  }
+function rememberBackend(backend: FileSystemBackend, persist = true): FileSystemBackend {
+  try { if (persist) localStorage.setItem(BACKEND_STORAGE_KEY, backend.name) } catch { /* Storage may be restricted. */ }
+  cachedBestBackend = backend
+  return backend
+}
 
-  // Run the test once and cache the result
-  bestBackendPromise = (async () => {
-    if (isOPFSAvailable()) {
-      // Verify OPFS actually works including write support
-      // Safari has OPFS read support but no createWritable() for writes
+async function hasExistingOPFSFiles(): Promise<boolean> {
+  try {
+    const root = await navigator.storage.getDirectory()
+    for (const name of ['siglum-files', 'siglum-git']) {
       try {
-        const writeSupported = await testOPFSWriteSupport()
-        if (writeSupported) {
-          // Only import OPFS backend when we know it works
-          const { opfsBackend } = await import('./OPFSBackend.js')
-          cachedBestBackend = opfsBackend
-          console.log('[FileSystem] Using OPFS backend')
-          return opfsBackend
-        }
-        console.warn('[FileSystem] OPFS available but createWritable not supported, falling back to IndexedDB')
-      } catch {
-        console.warn('[FileSystem] OPFS available but failed, falling back to IndexedDB')
+        const directory = await root.getDirectoryHandle(name)
+        for await (const _entry of (directory as any).values()) return true
+      } catch { /* This namespace has not been used. */ }
+    }
+  } catch { /* Storage is unavailable; the saved preference is checked separately. */ }
+  return false
+}
+
+export async function getBestBackend(): Promise<FileSystemBackend> {
+  if (cachedBestBackend) return cachedBestBackend
+  if (bestBackendPromise) return bestBackendPromise
+
+  bestBackendPromise = (async () => {
+    const previous = savedBackend()
+    if (previous !== 'indexeddb' && isOPFSAvailable()) {
+      if (await testOPFSWriteSupport()) {
+        const { opfsBackend } = await import('./OPFSBackend.js')
+        console.log('[FileSystem] Using OPFS backend')
+        return rememberBackend(opfsBackend)
       }
+      // Also protect existing installations which predate the saved preference.
+      if (previous === 'opfs' || await hasExistingOPFSFiles()) {
+        throw new Error('Your document storage is temporarily unavailable. Reload to try again. Siglum has not switched storage or replaced your documents.')
+      }
+    } else if (previous === 'opfs') {
+      throw new Error('Your document storage is unavailable in this browser context. Reopen Siglum in the browser where you saved your documents.')
     }
 
-    // Only import IndexedDB backend when we actually need it
     const { indexedDBBackend } = await import('./IndexedDBBackend.js')
     console.log('[FileSystem] Using IndexedDB backend')
-    cachedBestBackend = indexedDBBackend
-    return indexedDBBackend
-  })()
+    // A first-time fallback is tentative until a document is opened. This avoids
+    // pinning an empty fallback when an older installation temporarily loses OPFS.
+    return rememberBackend(indexedDBBackend, previous === 'indexeddb')
+  })().catch(error => {
+    bestBackendPromise = null
+    throw error
+  })
 
   return bestBackendPromise
 }

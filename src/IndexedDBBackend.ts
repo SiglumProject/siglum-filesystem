@@ -234,6 +234,7 @@ export class IndexedDBBackend implements FileSystemBackend {
   async exists(path: string): Promise<boolean> {
     const db = await this.getDB()
     const normalized = this.normalizePath(path)
+    if (normalized === '/') return true
 
     // Check both stores in a single transaction
     return new Promise<boolean>((resolve, reject) => {
@@ -259,6 +260,8 @@ export class IndexedDBBackend implements FileSystemBackend {
   async stat(path: string): Promise<FileStats> {
     const db = await this.getDB()
     const normalized = this.normalizePath(path)
+    // The mounted root exists implicitly, just as it does in OPFS.
+    if (normalized === '/') return { size: 0, isDirectory: true, isFile: false, mtime: new Date(0) }
 
     // Check both stores in a single transaction
     return new Promise<FileStats>((resolve, reject) => {
