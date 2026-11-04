@@ -1,5 +1,7 @@
 # @siglum/filesystem
 
+[![npm version](https://img.shields.io/npm/v/@siglum/filesystem)](https://www.npmjs.com/package/@siglum/filesystem)
+
 Unified filesystem abstraction for browser storage with automatic fallback.
 
 ## Installation
