@@ -97,27 +97,28 @@ export class OPFSBackend implements FileSystemBackend {
     return { parent, name }
   }
 
-  async readFile(path: string): Promise<string> {
+  private async getFileForRead(path: string): Promise<File> {
     try {
-      const { parent, name } = await this.getParentAndName(path)
-      const fileHandle = await parent.getFileHandle(name)
-      const file = await fileHandle.getFile()
-      return file.text()
-    } catch {
-      throw new Error(`ENOENT: no such file or directory: ${path}`)
+      const handle = await this.getFileHandle(path)
+      return await handle.getFile()
+    } catch (error) {
+      // Keep the existing missing-path contract without hiding permission or
+      // transient storage failures behind an ENOENT.
+      if (error instanceof DOMException && error.name === 'NotFoundError') {
+        throw new Error('ENOENT: no such file or directory: ' + path)
+      }
+      throw error
     }
   }
 
+  async readFile(path: string): Promise<string> {
+    const file = await this.getFileForRead(path)
+    return file.text()
+  }
+
   async readBinary(path: string): Promise<Uint8Array> {
-    try {
-      const { parent, name } = await this.getParentAndName(path)
-      const fileHandle = await parent.getFileHandle(name)
-      const file = await fileHandle.getFile()
-      const buffer = await file.arrayBuffer()
-      return new Uint8Array(buffer)
-    } catch {
-      throw new Error(`ENOENT: no such file or directory: ${path}`)
-    }
+    const file = await this.getFileForRead(path)
+    return new Uint8Array(await file.arrayBuffer())
   }
 
   async writeFile(path: string, content: string): Promise<void> {
