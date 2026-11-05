@@ -36,6 +36,17 @@ const backend = await fileSystem.mountAuto('/documents')
 console.log(`Using ${backend.name} backend`)  // 'opfs' or 'indexeddb'
 ```
 
+Automatic selection keeps the saved IndexedDB backend. For Siglum projects, it
+also recovers existing IndexedDB documents when OPFS has no project files, including
+an OPFS preference saved by an older version before a document was opened. The
+check reads file names in `/src/` and legacy top-level `.tex` paths. Compiler
+caches and empty directories are excluded. When both stores contain project
+files, selection keeps OPFS. An incomplete storage inspection raises a retryable
+error before mounting a backend.
+
+OPFS text and binary reads preserve browser access and read errors. Missing
+paths continue to report `ENOENT`.
+
 ### Force a Specific Backend
 
 ```typescript

@@ -15,7 +15,7 @@
  *   /output/     -> OPFSBackend (compiled PDFs)
  */
 
-import { BACKEND_STORAGE_KEY } from './constants.js'
+import { BACKEND_STORAGE_KEY, IDB_FILES_STORE, IDB_NAME } from './constants.js'
 
 import type {
   FileSystemBackend,
@@ -106,13 +106,97 @@ function rememberBackend(backend: FileSystemBackend, persist = true): FileSystem
   return backend
 }
 
+function isLegacyDocument(path: string): boolean {
+  return /^\/[^/]+\.tex$/i.test(path)
+}
+
+async function hasIndexedDBProjectFiles(): Promise<boolean> {
+  if (typeof indexedDB === 'undefined') return false
+
+  const database = await new Promise<IDBDatabase | null>((resolve, reject) => {
+    const request = indexedDB.open(IDB_NAME)
+    let missing = false
+    request.onupgradeneeded = () => {
+      // Opening a nonexistent database starts creation. Cancel this probe.
+      missing = true
+      request.transaction!.abort()
+    }
+    request.onsuccess = () => resolve(request.result)
+    request.onerror = () => missing ? resolve(null) : reject(request.error)
+  })
+  if (!database) return false
+
+  try {
+    if (!database.objectStoreNames.contains(IDB_FILES_STORE)) return false
+    return await new Promise<boolean>((resolve, reject) => {
+      const transaction = database.transaction(IDB_FILES_STORE, 'readonly')
+      const request = transaction.objectStore(IDB_FILES_STORE).openKeyCursor()
+      transaction.onabort = () => reject(transaction.error)
+      request.onerror = () => reject(request.error)
+      request.onsuccess = () => {
+        const cursor = request.result
+        if (!cursor) {
+          resolve(false)
+        } else if (typeof cursor.key === 'string' &&
+          (cursor.key.startsWith('/src/') || isLegacyDocument(cursor.key))) {
+          resolve(true)
+        } else {
+          cursor.continue()
+        }
+      }
+    })
+  } finally {
+    database.close()
+  }
+}
+
+function directoryEntries(directory: FileSystemDirectoryHandle): AsyncIterable<FileSystemHandle> {
+  return (directory as FileSystemDirectoryHandle & { values(): AsyncIterable<FileSystemHandle> }).values()
+}
+
+async function containsFiles(directory: FileSystemDirectoryHandle): Promise<boolean> {
+  for await (const entry of directoryEntries(directory)) {
+    if (entry.kind === 'file' || await containsFiles(entry as FileSystemDirectoryHandle)) return true
+  }
+  return false
+}
+
+async function openDirectory(root: FileSystemDirectoryHandle, name: string): Promise<FileSystemDirectoryHandle | null> {
+  try {
+    return await root.getDirectoryHandle(name)
+  } catch (error) {
+    if (error instanceof DOMException && error.name === 'NotFoundError') return null
+    throw error
+  }
+}
+
+async function detectDocumentBackend(): Promise<'opfs' | 'indexeddb'> {
+  try {
+    const root = await navigator.storage.getDirectory()
+    const files = await openDirectory(root, 'siglum-files')
+    if (files) {
+      for await (const entry of directoryEntries(files)) {
+        if (entry.kind === 'file' && isLegacyDocument(`/${entry.name}`)) return 'opfs'
+        if (entry.kind === 'directory' && entry.name === 'src' &&
+          await containsFiles(entry as FileSystemDirectoryHandle)) return 'opfs'
+      }
+    }
+    const git = await openDirectory(root, 'siglum-git')
+    if (git && await containsFiles(git)) return 'opfs'
+    return await hasIndexedDBProjectFiles() ? 'indexeddb' : 'opfs'
+  } catch {
+    // A partial inspection cannot establish which store contains the documents.
+    throw new Error('Your document storage is temporarily unavailable. Reload to try again.')
+  }
+}
+
 async function hasExistingOPFSFiles(): Promise<boolean> {
   try {
     const root = await navigator.storage.getDirectory()
     for (const name of ['siglum-files', 'siglum-git']) {
       try {
         const directory = await root.getDirectoryHandle(name)
-        for await (const _entry of (directory as any).values()) return true
+        for await (const _entry of directoryEntries(directory)) return true
       } catch { /* This namespace has not been used. */ }
     }
   } catch { /* Storage is unavailable; the saved preference is checked separately. */ }
@@ -127,6 +211,13 @@ export async function getBestBackend(): Promise<FileSystemBackend> {
     const previous = savedBackend()
     if (previous !== 'indexeddb' && isOPFSAvailable()) {
       if (await testOPFSWriteSupport()) {
+        // Older versions saved OPFS before confirming it contained the project.
+        const detected = await detectDocumentBackend()
+        if (detected === 'indexeddb') {
+          const { indexedDBBackend } = await import('./IndexedDBBackend.js')
+          console.log('[FileSystem] Using IndexedDB backend for existing documents')
+          return rememberBackend(indexedDBBackend)
+        }
         const { opfsBackend } = await import('./OPFSBackend.js')
         console.log('[FileSystem] Using OPFS backend')
         return rememberBackend(opfsBackend)
